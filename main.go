@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +36,11 @@ const (
 	keyFile     = "key.key"
 )
 
+func getPosition() string {
+	_, file, line, _ := runtime.Caller(1)
+	return fmt.Sprintf("%s:%d", file, line)
+}
+
 func check() {
 	if *m3u8Path == "" {
 		fmt.Fprintf(os.Stderr, "must have m3u8 file path\n")
@@ -53,15 +60,22 @@ func check() {
 func download(url, file string) error {
 	_, err := os.Stat(file)
 	if err == nil {
+		//fmt.Fprintf(os.Stderr, "pos:%s\n", getPosition())
 		fmt.Fprintf(os.Stdout, "file:%s exist\n", file)
 		return nil
 	}
 
 	fmt.Fprintf(os.Stdout, "download:%s\n", url)
+	fmt.Fprintf(os.Stdout, "cmd:wget -q %s -O %s\n", url, file)
 	cmd := exec.Command("wget", "-q", url, "-O", file)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	err = cmd.Run()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pos:%s\n", getPosition())
+		fmt.Fprintf(os.Stderr, "download:%s failed,err:%s\n", url, err.Error())
+	}
+	return err
 
 	resp, err := http.Get(url)
 	if err != nil {
@@ -93,6 +107,7 @@ func downloadFromChan() {
 		}
 		fmt.Fprintf(os.Stdout, "begin dowload:%s\n", files[0])
 		if len(files) == 4 {
+			//fmt.Fprintf(os.Stderr, "pos:%s\n", getPosition())
 			fmt.Fprintf(os.Stdout, "all file:%s,now file id:%s\n", files[2], files[3])
 		}
 		wg.Add(1)
@@ -113,8 +128,13 @@ func downloadFromChan() {
 			defer wg.Done()
 			err := download(files[0], files[1])
 			if err == nil {
+				//fmt.Fprintf(os.Stderr, "pos:%s\n", getPosition())
 				fmt.Fprintf(os.Stdout, "download file:%s success\n", files[0])
+				if len(files) == 4 {
+					fmt.Fprintf(os.Stdout, "all file:%s,now file id:%s\n", files[2], files[3])
+				}
 			} else {
+				fmt.Fprintf(os.Stderr, "pos:%s\n", getPosition())
 				fmt.Fprintf(os.Stdout, "download file:%s failed,err:%s\n", files[0], err.Error())
 			}
 			mux.Lock()
@@ -129,6 +149,7 @@ func downloadM3u8Content() error {
 	dstM3u8Content := ""
 	data, err := ioutil.ReadFile(m3u8FileBak)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "pos:%s\n", getPosition())
 		fmt.Fprintf(os.Stderr, "read index.m3u8 failed,err:%s\n", err.Error())
 		return err
 	}
@@ -142,19 +163,23 @@ func downloadM3u8Content() error {
 	}
 	fileIdx := 0
 	for _, line := range lines {
-		dstM3u8Content += strings.Replace(line, commonURL, "", -1) + "\n"
-
 		if strings.Contains(line, "URI=") {
 			ks := strings.Split(line, "\"")
 			if len(ks) == 3 {
 				downloadFilesChan <- []string{host + ks[1], keyFile}
 			}
+			sps := strings.Split(line, "URI=")
+			if len(sps) == 2 {
+				dstM3u8Content += sps[0] + "URI=\"" + keyFile + "\""
+			}
 		} else if strings.Contains(line, ".ts") {
-			tmpLine := line
+			sps := strings.Split(line, "/")
 			fileIdx++
-			downloadFilesChan <- []string{host + line, strings.Replace(tmpLine, commonURL, "", -1),
+			downloadFilesChan <- []string{host + line, sps[len(sps)-1],
 				fmt.Sprintf("%d", allFileNum), fmt.Sprintf("%d", fileIdx)}
-
+			dstM3u8Content += sps[len(sps)-1] + "\n"
+		} else {
+			dstM3u8Content += line + "\n"
 		}
 	}
 	ioutil.WriteFile(m3u8File, []byte(dstM3u8Content), 0666)
@@ -173,9 +198,17 @@ func convertM3u8ToMP4() {
 
 	_, err := os.Stat(dstFile)
 	if err == nil {
-		//fmt.Fprintf(os.Stdout, "mp4 file:%s is exist now,remove ts file\n", dstFile)
-		//os.Remove("*.ts")
+		fmt.Fprintf(os.Stdout, "file:%s exist,will remove ts file\n", dstFile)
+		filepath.Walk("./", func(path string, info os.FileInfo, err error) error {
+			if strings.HasSuffix(path, ".ts") {
+				os.Remove(path)
+			}
+			return nil
+		})
 	}
+	os.Remove(m3u8File)
+	os.Remove(m3u8FileBak)
+	os.Remove(keyFile)
 }
 
 func main() {
